@@ -1,0 +1,244 @@
+#!/usr/bin/perl
+#
+# httpauth.monitor - ross@virtualgeek.net
+# This monitor will check for a http 200 response from one or more url's either directly
+# or by using a host-header request against each backend server. This is primarily of 
+# use for checking website functionality behind load balancers.
+# Support for authentication via NTLM or basic auth is supported.
+#
+# You are free to copy/modify this code, but its always nice to say thankyou.
+#
+# Usage of this script is entirely at your own risk.
+#
+
+my $host_header;
+
+use Getopt::Std;
+use LWP::UserAgent;
+use LWP::Authen::Ntlm; # Is actually called silently by LWP, but this way you get an error if its missing.
+use HTTP::Cookies;
+use HTTP::Request::Common;
+
+my %page = ();
+
+sub LWP::UserAgent::redirect_ok {
+    my ($self, $prospective_request, $response) = @_;
+
+    # Check response for multiple location headers.
+    my $original_host = $response->header('Host');
+    my $original_location = $response->header('Location');
+
+	# catch redirects which may reconnect to a full domain instead of via host-header
+    if ($original_host !~ m/$host_header/)  {
+    	my $uri = $prospective_request->uri();
+    	$prospective_request->header('Host', $host_header);
+	}
+
+    my $ok = ($prospective_request, $response);
+    return $ok;
+};
+
+sub show_help	{
+
+print "
+httpauth.monitor - ross@virtualgeek.net
+This is a MON [http://mon.wiki.kernel.org] monitor.
+
+Standard Http Poll Usage:
+\tperl ./ghttpauth.monitor [-U mydomain\\my.user -P mypassword -t 10] http://www.mywebsite.com/about.php
+
+This checks for a 200 response from the specified urls and will work with either NTLM or basic auth.
+Note: Multiple target websites can be specified, space seperated, on the cli.
+
+Host Header Http Poll Usage:
+\t perl ./ghttpauth.monitor [-U mydomain\\my.user -P mypassword -t 10  -u /translate/ ] -h http://mywebsite.com 10.1.1.1 10.1.1.2 10.1.1.3
+
+As above, except for use in checking the health of individual servers in a web server farm
+eg using standard http poll usage described at the top would simply request the website from wherever DNS pointed
+this enables you to check the health of host headered sites on each individual web server, without modifying DNS
+or your hosts files.
+
+Parameters:
+-U Username - if using NTLM, use mydomain\\\\my.user (NOTE the 2x \\\\).
+-P Password
+-u Virtual directory or file name URL section eg /translate/ or /healthcheck.php
+-h Host Header eg domain name including http:// eg http://www.google.com
+-p Port if not port 80.
+-t Timeout for http requests - defaults to 10 seconds.
+-d Dump retrieved page contents (useful for debugging).
+-s Should exist - as in this text string should exist in the retrieved page eg -s OK
+-S Should NOT exist - as in this text string should NOT exist in the retrieved page eg -S ERROR
+
+NOTE:  When used with mon, the final list of hosts or URL's are the host groups supplied by MON.
+
+";
+
+exit 0;
+}
+
+# Some sites have odd cookies which cause the cookie jar to print warnings - 
+# this breaks mon as the output is misinterpreted.  Found this hack via google.
+local $SIG{__WARN__} = sub {
+        warn @_ unless $_[0] =~ m(^.* too (?:big|small));
+};        
+
+my %opt;
+getopts("U:P:u:p:t:h:H:s:S:d:D:j:", \%opt);
+
+my $user = $opt{U} || 'default\default.user'; 
+my $pass = $opt{P} || 'default';
+my $userdomain = $port{D};
+my $timeout = $opt{t} || 10;
+my $url_path = $opt{u};
+my $port = $opt{p};
+my $dump_page = $opt{d};
+$host_header = $opt{h};
+my $should_be = $opt{s}; # alarm if not present
+$should_be = qr/$should_be/is, if ($opt{s});
+my $should_not_be = $opt{S}; # alarm if present 
+$should_not_be = qr/$should_not_be/is, if ($opt{S});
+
+my @passed;
+my @failed;
+
+my $START_TIME = time;
+
+if (!@ARGV)	{ show_help()};
+if ($opt{H}) { show_help()};
+
+my @hostlist = @ARGV;
+
+foreach my $host (@ARGV)	{
+	# for each host create the useragent, cookie jar and check the url format
+	my $ua = LWP::UserAgent->new(keep_alive=>1, timeout=>$timeout, max_redirect=>20)|| die $!;
+	my $cookies = new HTTP::Cookies();
+	$ua->cookie_jar($cookies);
+	my $url;
+	my $raw_host = $host;
+	if ($host !~ m/http\:\/\//)	{
+		$url = "http://".$host;
+	}else{
+		$raw_host =~ s/http\:\/\///ig;
+		$url = $host;
+	}
+	
+	#Because the credentials have to be set individually to match the url and port for ntlm auth
+	# to work, all this mucking about is needed.
+	$url= $url.":$port", if ($port);
+	$url= $url.$url_path;
+	if ($port)	{
+		$ua->credentials("$raw_host:$port", "$userdomain", $user,$pass);
+	}elsif((!$port)&& ($host !~ m/\:\d+/i)){
+		if ($host =~ m/\//i) {
+			(my $domain, my $url) = split(/\//,$raw_host,2);
+			$ua->credentials("$domain:80", "$userdomain", $user,$pass);
+		}else{
+			$ua->credentials("$raw_host:80", "$userdomain", $user,$pass);
+		}
+	}elsif((!$port)&& ($host =~ m/\:\d+/ig)){
+		if ($host =~ m/\//i) {
+        	( my $domain, my $url) = split(/\//,$raw_host,2);
+	        $ua->credentials("$domain", $userdomain, $user,$pass);
+    	}else{
+        	$ua->credentials("$raw_host", "$userdomain", $user,$pass);
+	    }
+	}		
+
+	$request = GET $url;
+	# Add basic authentication credentials
+	$request->authorization_basic($user, $pass);
+	# request the required website via host header
+	$request->header('Host', $host_header);
+	$response = $ua->request($request);
+
+	#process responses and do content checks etc...
+	if ($response->is_success) {
+		my $response_status = $response->status_line;
+		my $response_code = $response->code;
+		my $response_string = $response->headers_as_string;
+		my $response_page = $response->decoded_content;
+		
+		if ($should_be)	{ 
+			#Check for content that should exist (if requested)
+			if ($response_page =~ m/$should_be/g)	{
+				push(@passed,[$url,$response_code,$response_string,"Should_Be(passed): $should_be",$response_page]);
+			}else{
+				push(@failed,[$url,$response_code,$response_string,"Should_Be(failed): $should_be",$response_page]);
+			}
+		}elsif($should_not_be) {
+			#Check for content that should NOT exist (if requested)
+			if ($response_page =~ m/$should_not_be/g)    {
+				push(@failed,[$url,$response_code,$response_string,"Should_Not_Be(failed): $should_not_be",$response_page]);
+			}else{
+				push(@passed,[$url,$response_code,$response_string,"Should_Not_Be(passed): $should_not_be",$response_page]);
+        	}
+		}else{
+			push(@passed,[$url,$response_code,$response_string]);
+		}
+	}else{
+		# Failed response
+		my $response_code = $response->status_line;
+		my $response_string = $response->headers_as_string;
+		my $response_page = $response->decoded_content;
+		if ($dump_page)	{ 
+			$page{$url}=$response_page;
+		}		
+		push(@failed,[$url,$response_code,$response_string]);
+	}
+}
+
+$END_TIME = time;
+
+if (@failed)    {
+	foreach my $failed_entry (@failed)    {
+		print "$failed_entry->[0] : DOWN, ";
+	}
+	print "\n";
+    foreach my $passed_entry (@passed)    {
+		print "$passed_entry->[0]: UP\n";                                             
+    }
+		
+	print "\n\nDetailed Data:\n-------------------\n";
+	print "start time: " . localtime ($START_TIME) . "\n";
+	print "end time  : " . localtime ($END_TIME) . "\n";
+	print "duration  : " . ($END_TIME - $START_TIME) . " seconds\n\n";
+	
+	foreach my $failed_entry (@failed)    {
+		print "$failed_entry->[0] -> ";
+		print "$failed_entry->[1]\n";
+		print "$failed_entry->[2]";
+		print "$failed_entry->[3]\n\n", if ($failed_entry->[3]);
+		
+		if ($dump_page)	{ print "Page Dump:\n".$page{$failed_entry[0]}."\n"};
+			print "\n";	
+    }
+    foreach my $passed_entry (@passed)    {
+        print "$passed_entry->[0] -> ";
+        print "$passed_entry->[1] : UP\n";
+        print "$passed_entry->[2]";
+        print "$passed_entry->[3]\n\n", if ($passed_entry->[3]);
+		print "\n";
+    }
+    exit 1;
+}
+
+if (@passed)   {
+	# remove the below if you need to do some debugging of passed entries
+	exit 0;
+    foreach my $passed_entry (@passed)    {
+		print "$passed_entry->[0] : UP, ";
+    }
+	print "\n";
+	print "\n\nDetailed Data:\n-------------------\n";
+	print "start time: " . localtime ($START_TIME) . "\n";
+	print "end time  : " . localtime ($END_TIME) . "\n";
+	print "duration  : " . ($END_TIME - $START_TIME) . " seconds\n\n";
+
+    foreach my $passed_entry (@passed)    {
+            print "$passed_entry->[0] -> ";
+            print "$passed_entry->[1]\n";
+            print "$passed_entry->[2]";
+            print "$passed_entry->[3]\n\n", if ($passed_entry->[3]);
+    }
+    exit 0;
+}
