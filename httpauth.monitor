@@ -45,13 +45,13 @@ httpauth.monitor - ross@virtualgeek.net
 This is a MON [http://mon.wiki.kernel.org] monitor.
 
 Standard Http Poll Usage:
-\tperl ./ghttpauth.monitor [-U mydomain\\my.user -P mypassword -t 10] http://www.mywebsite.com/about.php
+\tperl ./httpauth.monitor [-U mydomain\\my.user -P mypassword -t 10] http://www.mywebsite.com/about.php
 
 This checks for a 200 response from the specified urls and will work with either NTLM or basic auth.
 Note: Multiple target websites can be specified, space seperated, on the cli.
 
 Host Header Http Poll Usage:
-\t perl ./ghttpauth.monitor [-U mydomain\\my.user -P mypassword -t 10  -u /translate/ ] -h http://mywebsite.com 10.1.1.1 10.1.1.2 10.1.1.3
+\t perl ./httpauth.monitor [-U mydomain\\my.user -P mypassword -t 10  -u /translate/ ] -h http://mywebsite.com 10.1.1.1 10.1.1.2 10.1.1.3
 
 As above, except for use in checking the health of individual servers in a web server farm
 eg using standard http poll usage described at the top would simply request the website from wherever DNS pointed
